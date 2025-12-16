@@ -25,63 +25,119 @@ app.MapGet("/step2", (AppState state) =>
 
     var uniqueZips = records
         .Select(r => r.zip_code)
-        .Where(z => !string.IsNullOrWhiteSpace(z))
+        .Where(Utils.IsValidZip5)
+        .Select(z => z!.Trim())
         .Distinct()
         .OrderBy(z => z)
         .ToList();
 
-    var lowNoInternetZips = records
-        .Where(r => r.no_internet_access_percentage.HasValue &&
-                    r.no_internet_access_percentage.Value < 0.10 &&
-                    !string.IsNullOrWhiteSpace(r.zip_code))
-        .Select(r => r.zip_code!)
-        .Distinct()
-        .OrderBy(z => z)
+    var lowNoInternet = records
+        .Where(r => r.no_internet_access_percentage.HasValue)
+        .Where(r => Utils.IsValidZip5(r.zip_code))
+        .Select(r => new
+        {
+            Zip = r.zip_code!.Trim(),
+            NoInternet = r.no_internet_access_percentage!.Value
+        })
+        .GroupBy(x => x.Zip)
+        .Select(g => new
+        {
+            Zip = g.Key,
+            NoInternet = g.Min(x => x.NoInternet)
+        })
+        .Where(x => x.NoInternet < 0.10)
+        .OrderBy(x => x.Zip)
         .ToList();
 
-    // Build ZIP list HTML
-    var zipListHtml = lowNoInternetZips.Count == 0
-        ? "<p><em>No ZIP codes found under 10%.</em></p>"
-        : "<ul>" + string.Join("", lowNoInternetZips.Select(z => $"<li>{z}</li>")) + "</ul>";
+    string lowTableHtml;
+    if (lowNoInternet.Count == 0)
+    {
+        lowTableHtml = "<p><em>No ZIP codes found under 10%.</em></p>";
+    }
+    else
+    {
+        var lowRows = string.Join("", lowNoInternet.Select(x =>
+            $"<tr><td>{x.Zip}</td><td>{Utils.FormatPercent(x.NoInternet)}</td></tr>"
+        ));
 
-    // Table preview (first 50)
-    var preview = records.Take(50).ToList();
-    var rowsHtml = string.Join("", preview.Select(r =>
-        $"<tr><td>{r.zip_code}</td><td>{(r.no_internet_access_percentage.HasValue ? (r.no_internet_access_percentage.Value * 100).ToString("0.00") + "%" : "")}</td></tr>"
-    ));
+        lowTableHtml = $"""
+            <table class="data">
+                <thead>
+                    <tr><th>ZIP Code</th><th>No Internet Access (%)</th></tr>
+                </thead>
+                <tbody>
+                    {lowRows}
+                </tbody>
+            </table>
+            <p><em>Count: {lowNoInternet.Count}</em></p>
+        """;
+    }
 
-    var tableHtml = $"""
-        <table class="data">
-            <thead>
-                <tr>
-                    <th>ZIP Code</th>
-                    <th>No Internet Access (%)</th>
-                </tr>
-            </thead>
-            <tbody>
-                {rowsHtml}
-            </tbody>
-        </table>
-        <p><em>Showing first {preview.Count} of {records.Count} rows.</em></p>
-    """;
+    string rawTableHtml;
+    var previewCount = Math.Min(100, state.RawRows.Count);
+    var previewRows = state.RawRows.Take(previewCount).ToList();
+
+    if (state.RawHeaders.Count == 0 || state.RawRows.Count == 0)
+    {
+        rawTableHtml = "<p><em>No raw table data available. Try importing again.</em></p>";
+    }
+    else
+    {
+        var headerHtml = string.Join("", state.RawHeaders.Select(h =>
+            $"<th>{Utils.HtmlEncode(h)}</th>"
+        ));
+
+        var bodyRowsHtml = string.Join("", previewRows.Select(row =>
+  {
+      var tds = string.Join("", state.RawHeaders.Select(h =>
+          $"<td>{Utils.HtmlEncode(row.TryGetValue(h, out var v) ? v : "")}</td>"
+      ));
+      return $"<tr>{tds}</tr>";
+  }));
+
+        rawTableHtml = $"""
+            <div class="table-wrap">
+                <table class="data">
+                    <thead>
+                        <tr>{headerHtml}</tr>
+                    </thead>
+                    <tbody>
+                        {bodyRowsHtml}
+                    </tbody>
+                </table>
+            </div>
+            <p><em>Showing first {previewCount} of {state.RawRows.Count} rows.</em></p>
+
+        """;
+    }
 
     var body = $"""
         <h1>Phase 2: Preview</h1>
 
         <p><strong>Total unique ZIP codes:</strong> {uniqueZips.Count}</p>
+        <p><em>Note: ZIP-based calculations include only 5-digit ZIP codes.</em></p>
 
         <h2>ZIP codes with &lt; 10% homes with no internet access</h2>
-        {zipListHtml}
+        {lowTableHtml}
 
         <h2>Raw data (preview)</h2>
-        {tableHtml}
+        {rawTableHtml}
     """;
 
     return Results.Content(
-        RenderPage("Step 2 - Preview", body, backUrl: "/step1", nextUrl: "/step3", showNext: true),
+        RenderPage(
+            title: "Step 2 - Preview",
+            bodyContent: body,
+            backUrl: "/step1",
+            nextUrl: "/step3",
+            showNext: true,
+            showRestart: true
+        ),
         "text/html; charset=utf-8"
     );
 });
+
+
 
 
 app.MapGet("/step3", (AppState state) =>
@@ -122,13 +178,17 @@ app.MapPost("/import", async (AppState state) =>
     try
     {
         var url = "https://data.cityofnewyork.us/resource/qz5f-yx82.csv";
-
         using var httpClient = new HttpClient();
         var csvText = await httpClient.GetStringAsync(url);
 
+        // Typed records (for calculations)
         state.Records = CsvParsing.ParseInternetCsv(csvText);
-        state.HasData = true;
 
+        var raw = CsvParsing.ParseRawCsv(csvText); // no limit
+        state.RawHeaders = raw.Headers;
+        state.RawRows = raw.Rows;
+
+        state.HasData = true;
         return Results.Redirect("/step2");
     }
     catch (HttpRequestException ex)
@@ -182,6 +242,7 @@ string RenderPage(
 {
     var navButtons = "";
 
+
     if (backUrl != null)
         navButtons += $"<a href=\"{backUrl}\">⬅ Back</a> ";
 
@@ -207,25 +268,28 @@ string RenderPage(
     <meta charset="utf-8" />
     <title>__TITLE__</title>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            padding: 40px;
-        }
-        .nav {
-            margin-bottom: 20px;
-        }
-        .nav a, .nav button {
-            margin-right: 10px;
-        }
-        table.data {
+      .nav {
+    margin-bottom: 20px;
+  }
+
+  .nav a,
+  .nav button {
+    margin-right: 10px;
+  }
+  .table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+table.data {
   border-collapse: collapse;
   width: 100%;
-  max-width: 900px;
+  min-width: max-content; /* helps keep columns readable */
 }
 table.data th, table.data td {
   border: 1px solid #ccc;
   padding: 8px;
   text-align: left;
+  white-space: nowrap; /* prevents ugly wrapping */
 }
 table.data th {
   background: #f3f3f3;

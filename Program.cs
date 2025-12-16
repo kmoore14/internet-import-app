@@ -1,3 +1,5 @@
+using System.Text;
+
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<AppState>(); // Register Services 
 var app = builder.Build();
@@ -138,38 +140,51 @@ app.MapGet("/step2", (AppState state) =>
 });
 
 
-
-
 app.MapGet("/step3", (AppState state) =>
 {
     if (!state.HasData)
         return Results.Redirect("/step1");
 
-    var body = $"""
+    var body = """
         <h1>Phase 3: Export</h1>
-        <p>Placeholder export page.</p>
-        <p>Records available: {state.Records.Count}</p>
+        <p>Choose an export format:</p>
 
         <ul>
-            <li><a href="/export/json">Export JSON (todo)</a></li>
-            <li><a href="/export/xml">Export XML (todo)</a></li>
-            <li><a href="/export/raw">Export RAW (todo)</a></li>
+            <li><a href="/export/json">Export JSON</a></li>
+            <li><a href="/export/xml">Export XML</a></li>
+            <li><a href="/export/raw">Export RAW (CSV)</a></li>
         </ul>
-
-        <p>You can restart anytime using the Restart button above.</p>
     """;
 
     return Results.Content(
-        RenderPage(
-            title: "Step 3 - Export",
-            bodyContent: body,
-            backUrl: "/step2",
-            nextUrl: null,
-            showNext: false,
-            showRestart: true
-        ),
+        RenderPage("Step 3 - Export", body, backUrl: "/step2", showNext: false, showRestart: true),
         "text/html; charset=utf-8"
     );
+});
+
+
+app.MapGet("/export/json", (AppState state) =>
+{
+    if (!state.HasData) return Results.Redirect("/step1");
+
+    var json = Exports.ToJson(state);
+    return Results.File(Encoding.UTF8.GetBytes(json), "application/json; charset=utf-8", "internet_export_JSON.json");
+});
+
+app.MapGet("/export/xml", (AppState state) =>
+{
+    if (!state.HasData) return Results.Redirect("/step1");
+
+    var xml = Exports.ToXml(state);
+    return Results.File(Encoding.UTF8.GetBytes(xml), "application/xml; charset=utf-8", "internet_export_XML.xml");
+});
+
+app.MapGet("/export/raw", (AppState state) =>
+{
+    if (!state.HasData) return Results.Redirect("/step1");
+
+    var csv = Exports.ToCsv(state);
+    return Results.File(Encoding.UTF8.GetBytes(csv), "text/csv; charset=utf-8", "internet_raw_CSV.csv");
 });
 
 
